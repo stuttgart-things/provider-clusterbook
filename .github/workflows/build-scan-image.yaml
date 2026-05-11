@@ -34,7 +34,7 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Build & push to ttl.sh
-        uses: dagger/dagger-for-github@v6
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.20.0"
           verb: call
@@ -50,7 +50,7 @@ jobs:
           DAGGER_CLOUD_TOKEN: ${{ secrets.DAGGER_CLOUD_TOKEN }}
 
       - name: Scan image
-        uses: dagger/dagger-for-github@v6
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.20.0"
           verb: call

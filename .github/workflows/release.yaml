@@ -49,7 +49,7 @@ jobs:
 
       - name: Build & push image (version tag)
         if: steps.meta.outputs.version != ''
-        uses: dagger/dagger-for-github@v6
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.20.0"
           verb: call
@@ -69,7 +69,7 @@ jobs:
           DAGGER_CLOUD_TOKEN: ${{ secrets.DAGGER_CLOUD_TOKEN }}
 
       - name: Build & push image (latest tag)
-        uses: dagger/dagger-for-github@v6
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "0.20.0"
           verb: call
