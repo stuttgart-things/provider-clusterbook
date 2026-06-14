@@ -47,7 +47,7 @@ func setupNamespacedProviderConfig(mgr ctrl.Manager, o controller.Options) error
 
 	r := providerconfig.NewReconciler(mgr, of,
 		providerconfig.WithLogger(o.Logger.WithValues("controller", name)),
-		providerconfig.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
+		providerconfig.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name)))) //nolint:staticcheck // crossplane event.NewAPIRecorder requires the legacy record.EventRecorder
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
@@ -67,7 +67,7 @@ func setupClusterProviderConfig(mgr ctrl.Manager, o controller.Options) error {
 
 	r := providerconfig.NewReconciler(mgr, of,
 		providerconfig.WithLogger(o.Logger.WithValues("controller", name)),
-		providerconfig.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
+		providerconfig.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name)))) //nolint:staticcheck // crossplane event.NewAPIRecorder requires the legacy record.EventRecorder
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
