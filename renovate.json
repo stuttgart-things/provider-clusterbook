@@ -2,5 +2,19 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Group the Kubernetes + Crossplane Go module ecosystem into a single PR. controller-runtime, controller-tools, client-go and crossplane-runtime/apis are tightly version-coupled and must be upgraded together (see PRs #19/#20), so bumping them individually breaks the build.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/**",
+        "github.com/crossplane/**"
+      ],
+      "groupName": "kubernetes-crossplane"
+    }
   ]
 }
