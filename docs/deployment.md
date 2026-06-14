@@ -9,7 +9,7 @@ ghcr.io/stuttgart-things/provider-clusterbook:<version>
 ghcr.io/stuttgart-things/provider-clusterbook:latest
 ```
 
-Each [GitHub release](https://github.com/stuttgart-things/xplane-provider-clusterbook/releases) publishes a semver-tagged image.
+Each [GitHub release](https://github.com/stuttgart-things/provider-clusterbook/releases) publishes a semver-tagged image.
 
 ## Crossplane xpkg
 
