@@ -5,9 +5,9 @@ metadata:
   name: provider-clusterbook
   description: Crossplane Provider that manages IP reservations and PDNS records via clusterbook REST API
   annotations:
-    github.com/project-slug: stuttgart-things/xplane-provider-clusterbook
-    backstage.io/techdocs-ref: url:https://github.com/stuttgart-things/xplane-provider-clusterbook/tree/main
-    backstage.io/source-location: url:https://github.com/stuttgart-things/xplane-provider-clusterbook
+    github.com/project-slug: stuttgart-things/provider-clusterbook
+    backstage.io/techdocs-ref: url:https://github.com/stuttgart-things/provider-clusterbook/tree/main
+    backstage.io/source-location: url:https://github.com/stuttgart-things/provider-clusterbook
   tags:
     - crossplane
     - provider
@@ -15,7 +15,7 @@ metadata:
     - ipam
     - golang
   links:
-    - url: https://github.com/stuttgart-things/xplane-provider-clusterbook
+    - url: https://github.com/stuttgart-things/provider-clusterbook
       title: GitHub Repository
       icon: github
 spec:
