@@ -74,6 +74,7 @@ linters:
           - dupl
           - errcheck
           - exportloopref
+          - goconst
           - gocyclo
           - gosec
           - unparam
