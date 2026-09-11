@@ -93,19 +93,51 @@ type ClusterInfo struct {
 	Zone    string `json:"zone,omitempty"`
 }
 
-// ReserveRequest is the request body for reserving IPs.
+// ReserveRequest is the request body for reserving or updating an IP.
+//
+// The reserve endpoint takes no count: every call records exactly one address.
 type ReserveRequest struct {
-	Cluster   string `json:"cluster"`
-	Count     int    `json:"count,omitempty"`
+	Cluster string `json:"cluster"`
+	// IP asks reserve for this address instead of any free one. clusterbook
+	// answers 409 when it is taken and 404 when it is not in the pool.
 	IP        string `json:"ip,omitempty"`
 	CreateDNS bool   `json:"createDNS,omitempty"`
 	Status    string `json:"status,omitempty"`
 }
 
-// ReserveResponse is the response from the reserve/assign endpoint.
+// DNSOutcome is the DNS half of a write, which clusterbook reports alongside
+// the saved IP change ("ok", "failed" or "skipped").
+type DNSOutcome struct {
+	DNS      string `json:"dns,omitempty"`
+	DNSError string `json:"dns_error,omitempty"`
+}
+
+// err returns a *DNSError when the DNS half failed.
+func (o DNSOutcome) err(op string) error {
+	if o.DNS != "failed" {
+		return nil
+	}
+	return &DNSError{Op: op, Message: o.DNSError}
+}
+
+// DNSError reports that clusterbook saved an IP change but could not write or
+// remove the cluster's DNS record. The HTTP status is still 200, so without it
+// a failed record looks exactly like a written one.
+type DNSError struct {
+	Op      string
+	Message string
+}
+
+func (e *DNSError) Error() string {
+	return fmt.Sprintf("%s saved the IP change, but the DNS operation failed: %s", e.Op, e.Message)
+}
+
+// ReserveResponse is the response from the reserve endpoint.
 type ReserveResponse struct {
+	IP     string   `json:"ip"`
 	IPs    []string `json:"ips"`
 	Status string   `json:"status"`
+	DNSOutcome
 }
 
 // ReleaseRequest is the request body for releasing an IP.
@@ -113,8 +145,11 @@ type ReleaseRequest struct {
 	IP string `json:"ip"`
 }
 
-// ReserveIPs reserves IPs from the given network pool.
-func (c *Client) ReserveIPs(ctx context.Context, networkKey string, req ReserveRequest) (*ReserveResponse, error) {
+// ReserveIP reserves one address from the given network pool.
+//
+// When the address was recorded but its DNS record was not written, both the
+// response and a *DNSError are returned.
+func (c *Client) ReserveIP(ctx context.Context, networkKey string, req ReserveRequest) (*ReserveResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot marshal reserve request: %w", err)
@@ -142,7 +177,21 @@ func (c *Client) ReserveIPs(ctx context.Context, networkKey string, req ReserveR
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("cannot decode reserve response: %w", err)
 	}
-	return &result, nil
+	if result.IP == "" && len(result.IPs) > 0 {
+		result.IP = result.IPs[0]
+	}
+	if result.IP == "" {
+		return nil, fmt.Errorf("reserve response carries no ip")
+	}
+	return &result, result.err("reserve")
+}
+
+// dnsOutcome reads the DNS verdict from a write response. A body without one
+// (an empty 204, or a clusterbook older than v1.26.0) reports no failure.
+func dnsOutcome(op string, body io.Reader) error {
+	var o DNSOutcome
+	_ = json.NewDecoder(body).Decode(&o) // no verdict decodes to none
+	return o.err(op)
 }
 
 // GetIPs returns the IPs assigned to a cluster in the given network.
@@ -197,7 +246,8 @@ func (c *Client) GetClusterInfo(ctx context.Context, clusterName string) (*Clust
 	return &info, nil
 }
 
-// ReleaseIPs releases IPs assigned to a cluster in the given network.
+// ReleaseIPs releases an IP assigned to a cluster in the given network. A
+// *DNSError means the address was freed but its record was not removed.
 func (c *Client) ReleaseIPs(ctx context.Context, networkKey string, req ReleaseRequest) error {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -222,10 +272,12 @@ func (c *Client) ReleaseIPs(ctx context.Context, networkKey string, req ReleaseR
 		return fmt.Errorf("release request returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	return dnsOutcome("release", resp.Body)
 }
 
-// UpdateIP updates an existing IP assignment.
+// UpdateIP updates an existing IP assignment. clusterbook treats a status
+// ending in ":DNS" as a request for DNS, so pass the bare status and CreateDNS.
+// A *DNSError means the entry was saved but its record was not.
 func (c *Client) UpdateIP(ctx context.Context, networkKey, ip string, req ReserveRequest) error {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -250,5 +302,5 @@ func (c *Client) UpdateIP(ctx context.Context, networkKey, ip string, req Reserv
 		return fmt.Errorf("update request returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	return dnsOutcome("update", resp.Body)
 }

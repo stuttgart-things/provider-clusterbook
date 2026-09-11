@@ -69,15 +69,20 @@ spec:
                     type: string
                   count:
                     default: 1
-                    description: Count is the number of IPs to reserve. Defaults to
-                      1.
+                    description: |-
+                      Count is the number of IPs to reserve. Defaults to 1. Raising it
+                      reserves the missing addresses; lowering it releases the surplus.
                     type: integer
                   createDNS:
-                    description: CreateDNS optionally creates a PDNS wildcard record
-                      for the reserved IP.
+                    description: |-
+                      CreateDNS optionally creates a wildcard DNS record for the cluster. The
+                      record points at one address: the explicit IP if set, else the first.
                     type: boolean
                   ip:
-                    description: IP is an optional explicit IP address (skip auto-reserve).
+                    description: |-
+                      IP is an optional explicit IP address, reserved before any automatic
+                      ones. Reservation fails while another cluster holds it or when it is not
+                      in the pool; it never takes over an address.
                     type: string
                   networkKey:
                     description: NetworkKey is the network pool key (e.g. "10.31.103").

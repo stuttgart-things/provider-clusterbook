@@ -32,16 +32,20 @@ type IPReservationParameters struct {
 	// ClusterName is the cluster to assign IPs to.
 	ClusterName string `json:"clusterName"`
 
-	// Count is the number of IPs to reserve. Defaults to 1.
+	// Count is the number of IPs to reserve. Defaults to 1. Raising it
+	// reserves the missing addresses; lowering it releases the surplus.
 	// +kubebuilder:default=1
 	// +optional
 	Count int `json:"count,omitempty"`
 
-	// IP is an optional explicit IP address (skip auto-reserve).
+	// IP is an optional explicit IP address, reserved before any automatic
+	// ones. Reservation fails while another cluster holds it or when it is not
+	// in the pool; it never takes over an address.
 	// +optional
 	IP string `json:"ip,omitempty"`
 
-	// CreateDNS optionally creates a PDNS wildcard record for the reserved IP.
+	// CreateDNS optionally creates a wildcard DNS record for the cluster. The
+	// record points at one address: the explicit IP if set, else the first.
 	// +optional
 	CreateDNS bool `json:"createDNS,omitempty"`
 }

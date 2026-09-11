@@ -19,6 +19,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -63,7 +64,7 @@ func TestNewClient(t *testing.T) {
 	})
 }
 
-func TestReserveIPs(t *testing.T) {
+func TestReserveIP(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -73,29 +74,84 @@ func TestReserveIPs(t *testing.T) {
 				t.Errorf("path = %s, want /api/v1/networks/10.31.103/reserve", r.URL.Path)
 			}
 
-			var req ReserveRequest
+			var req map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("cannot decode request body: %v", err)
 			}
-			if req.Cluster != "mycluster" || req.Count != 1 {
-				t.Errorf("request = %+v, want cluster=mycluster count=1", req)
+			if req["cluster"] != "mycluster" || req["ip"] != "10.31.103.50" {
+				t.Errorf("request = %+v, want cluster=mycluster ip=10.31.103.50", req)
+			}
+			if _, ok := req["count"]; ok {
+				t.Error("reserve takes no count")
 			}
 
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(ReserveResponse{IPs: []string{"10.31.103.10"}, Status: "ASSIGNED"}) //nolint:errcheck
+			w.Write([]byte(`{"ip":"10.31.103.50","ips":["10.31.103.50"],"status":"ASSIGNED","dns":"skipped"}`)) //nolint:errcheck
 		}))
 		defer srv.Close()
 
 		c, _ := NewClient(srv.URL, nil)
-		resp, err := c.ReserveIPs(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster", Count: 1})
+		resp, err := c.ReserveIP(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster", IP: "10.31.103.50"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(resp.IPs) != 1 || resp.IPs[0] != "10.31.103.10" {
-			t.Errorf("IPs = %v, want [10.31.103.10]", resp.IPs)
+		if resp.IP != "10.31.103.50" {
+			t.Errorf("IP = %q, want 10.31.103.50", resp.IP)
 		}
 		if resp.Status != "ASSIGNED" {
 			t.Errorf("Status = %q, want ASSIGNED", resp.Status)
+		}
+	})
+
+	t.Run("takes the address from ips when ip is absent", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"ips":["10.31.103.10"],"status":"ASSIGNED"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		resp, err := c.ReserveIP(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.IP != "10.31.103.10" {
+			t.Errorf("IP = %q, want 10.31.103.10", resp.IP)
+		}
+	})
+
+	t.Run("reported DNS failure returns the address and a DNSError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"ip":"10.31.103.10","status":"ASSIGNED:DNS","dns":"failed","dns_error":"pdns: timeout"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		resp, err := c.ReserveIP(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster", CreateDNS: true})
+		var dnsErr *DNSError
+		if !errors.As(err, &dnsErr) {
+			t.Fatalf("err = %v, want a DNSError", err)
+		}
+		if dnsErr.Message != "pdns: timeout" {
+			t.Errorf("Message = %q, want pdns: timeout", dnsErr.Message)
+		}
+		if resp == nil || resp.IP != "10.31.103.10" {
+			t.Errorf("resp = %+v, want the reserved address", resp)
+		}
+	})
+
+	t.Run("taken explicit IP", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			w.Write([]byte(`{"error":"ip 10.31.103.50 is not free"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		resp, err := c.ReserveIP(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster", IP: "10.31.103.50"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if resp != nil {
+			t.Errorf("resp = %+v, want nil", resp)
 		}
 	})
 
@@ -107,7 +163,7 @@ func TestReserveIPs(t *testing.T) {
 		defer srv.Close()
 
 		c, _ := NewClient(srv.URL, nil)
-		_, err := c.ReserveIPs(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster", Count: 1})
+		_, err := c.ReserveIP(context.Background(), "10.31.103", ReserveRequest{Cluster: "mycluster"})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -262,6 +318,32 @@ func TestReleaseIPs(t *testing.T) {
 		}
 	})
 
+	t.Run("body without a DNS verdict is no failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"status":"ok","message":"IP 10.31.103.10 released"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		if err := c.ReleaseIPs(context.Background(), "10.31.103", ReleaseRequest{IP: "10.31.103.10"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reported DNS failure is a DNSError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"status":"ok","dns":"failed","dns_error":"ddwrt: ssh refused"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		err := c.ReleaseIPs(context.Background(), "10.31.103", ReleaseRequest{IP: "10.31.103.10"})
+		var dnsErr *DNSError
+		if !errors.As(err, &dnsErr) {
+			t.Fatalf("err = %v, want a DNSError", err)
+		}
+	})
+
 	t.Run("server error", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -297,7 +379,7 @@ func TestUpdateIP(t *testing.T) {
 				t.Errorf("status = %q, want ASSIGNED", req.Status)
 			}
 
-			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok","dns":"ok"}`)) //nolint:errcheck
 		}))
 		defer srv.Close()
 
@@ -309,6 +391,20 @@ func TestUpdateIP(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("reported DNS failure is a DNSError", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"status":"ok","dns":"failed","dns_error":"pdns: 500"}`)) //nolint:errcheck
+		}))
+		defer srv.Close()
+
+		c, _ := NewClient(srv.URL, nil)
+		err := c.UpdateIP(context.Background(), "10.31.103", "10.31.103.10", ReserveRequest{Cluster: "mycluster", Status: "ASSIGNED", CreateDNS: true})
+		var dnsErr *DNSError
+		if !errors.As(err, &dnsErr) {
+			t.Fatalf("err = %v, want a DNSError", err)
 		}
 	})
 
