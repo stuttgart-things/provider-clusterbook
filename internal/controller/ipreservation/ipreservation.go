@@ -172,51 +172,55 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	if !ok {
 		return managed.ExternalObservation{}, errors.New(errNotIPReservation)
 	}
+	p := cr.Spec.ForProvider
 
-	ips, err := e.client.GetIPs(ctx, cr.Spec.ForProvider.NetworkKey)
+	entries, err := e.client.GetIPs(ctx, p.NetworkKey)
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, errGetIPs)
 	}
 
-	// Find IPs assigned to this cluster
-	var assignedIPs []string
-	var status string
-	for _, ip := range ips {
-		if ip.Cluster == cr.Spec.ForProvider.ClusterName {
-			assignedIPs = append(assignedIPs, ip.IP)
-			status = ip.Status
-		}
-	}
-
-	if len(assignedIPs) == 0 {
+	held := heldBy(entries, p.ClusterName)
+	if len(held) == 0 {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
+	marked := dnsMarked(held)
+
 	// Fetch FQDN and zone from cluster info when DNS is active
 	var fqdn, zone string
-	if strings.Contains(status, "DNS") {
-		if info, err := e.client.GetClusterInfo(ctx, cr.Spec.ForProvider.ClusterName); err == nil {
+	if marked > 0 {
+		if info, err := e.client.GetClusterInfo(ctx, p.ClusterName); err == nil {
 			fqdn = info.FQDN
 			zone = info.Zone
 		}
 	}
 
 	cr.Status.AtProvider = v1alpha1.IPReservationObservation{
-		IPAddresses: assignedIPs,
-		Status:      status,
+		IPAddresses: addresses(held),
+		Status:      held[primary(held, p)].Status,
 		FQDN:        fqdn,
 		Zone:        zone,
 	}
 	cr.SetConditions(xpv2.Available())
 
-	// Check if the reservation matches desired state
-	countMatch := len(assignedIPs) == cr.Spec.ForProvider.Count
-	dnsMatch := !cr.Spec.ForProvider.CreateDNS || strings.Contains(status, "DNS")
-	upToDate := countMatch && dnsMatch
+	// clusterbook saves the ":DNS" marker before it touches DNS, so after a
+	// failed DNS write the marker is there without the record. When the last
+	// reconcile failed, let Update re-assert the record once; both DNS
+	// providers are idempotent.
+	retryDNS := p.CreateDNS && cr.GetCondition(xpv2.TypeSynced).Reason == xpv2.ReasonReconcileError
+
+	// clusterbook keeps one record per cluster, so exactly one address may
+	// carry the marker with createDNS and none without.
+	wantMarked := 0
+	if p.CreateDNS {
+		wantMarked = 1
+	}
+	countMatch := len(held) == wantedCount(p)
+	dnsMatch := marked == wantMarked
 
 	return managed.ExternalObservation{
 		ResourceExists:   true,
-		ResourceUpToDate: upToDate,
+		ResourceUpToDate: countMatch && dnsMatch && !retryDNS,
 	}, nil
 }
 
@@ -225,22 +229,23 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errNotIPReservation)
 	}
+	p := cr.Spec.ForProvider
 
-	req := clusterbookclient.ReserveRequest{
-		Cluster:   cr.Spec.ForProvider.ClusterName,
-		Count:     cr.Spec.ForProvider.Count,
-		IP:        cr.Spec.ForProvider.IP,
-		CreateDNS: cr.Spec.ForProvider.CreateDNS,
+	entries, err := e.client.GetIPs(ctx, p.NetworkKey)
+	if err != nil {
+		return managed.ExternalCreation{}, errors.Wrap(err, errGetIPs)
 	}
 
-	resp, err := e.client.ReserveIPs(ctx, cr.Spec.ForProvider.NetworkKey, req)
+	held, err := e.reserveMissing(ctx, p, entries, p.CreateDNS)
 	if err != nil {
+		// Record nothing: a partial status would read as complete. Observe
+		// finds what was reserved so far and Update adds the rest.
 		return managed.ExternalCreation{}, errors.Wrap(err, errReserveIPs)
 	}
 
 	cr.Status.AtProvider = v1alpha1.IPReservationObservation{
-		IPAddresses: resp.IPs,
-		Status:      resp.Status,
+		IPAddresses: addresses(held),
+		Status:      held[primary(held, p)].Status,
 	}
 
 	return managed.ExternalCreation{}, nil
@@ -251,25 +256,147 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	if !ok {
 		return managed.ExternalUpdate{}, errors.New(errNotIPReservation)
 	}
+	p := cr.Spec.ForProvider
 
-	// Determine IP to update: explicit spec IP or first assigned IP from status
-	ip := cr.Spec.ForProvider.IP
-	if ip == "" && len(cr.Status.AtProvider.IPAddresses) > 0 {
-		ip = cr.Status.AtProvider.IPAddresses[0]
+	entries, err := e.client.GetIPs(ctx, p.NetworkKey)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, errGetIPs)
 	}
 
-	if ip != "" {
-		req := clusterbookclient.ReserveRequest{
-			Cluster:   cr.Spec.ForProvider.ClusterName,
-			CreateDNS: cr.Spec.ForProvider.CreateDNS,
-			Status:    cr.Status.AtProvider.Status,
-		}
-		if err := e.client.UpdateIP(ctx, cr.Spec.ForProvider.NetworkKey, ip, req); err != nil {
-			return managed.ExternalUpdate{}, errors.Wrap(err, errUpdateIP)
-		}
+	// DNS is left to syncDNS, which picks the address that carries the record.
+	held, err := e.reserveMissing(ctx, p, entries, false)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, errReserveIPs)
+	}
+
+	held, err = e.releaseSurplus(ctx, p, held)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, errReleaseIPs)
+	}
+
+	if err := e.syncDNS(ctx, p, held); err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, errUpdateIP)
 	}
 
 	return managed.ExternalUpdate{}, nil
+}
+
+// reserveMissing reserves the addresses the cluster still lacks and returns
+// everything it holds afterwards. reserve takes no count, so it is called once
+// per address. Starting from what the cluster already holds makes a retry
+// after a partial failure add only the rest instead of leaking a second set.
+// With createDNS the first new address asks for the record, unless one of the
+// held addresses already carries it.
+func (e *external) reserveMissing(ctx context.Context, p v1alpha1.IPReservationParameters, entries []clusterbookclient.IPInfo, createDNS bool) ([]clusterbookclient.IPInfo, error) {
+	held := heldBy(entries, p.ClusterName)
+
+	need := wantedCount(p) - len(held)
+	if need <= 0 {
+		return held, nil
+	}
+	// Fail before reserving anything rather than leave a partial set behind.
+	if free := countFree(entries); free < need {
+		return held, errors.Errorf("not enough free IPs in network %s: need %d, have %d", p.NetworkKey, need, free)
+	}
+
+	explicit := p.IP
+	if explicit != "" && holds(held, fullIP(p.NetworkKey, explicit)) {
+		explicit = ""
+	}
+	createDNS = createDNS && dnsMarked(held) == 0
+
+	for i := 0; i < need; i++ {
+		req := clusterbookclient.ReserveRequest{Cluster: p.ClusterName}
+		if i == 0 {
+			req.IP = explicit
+			req.CreateDNS = createDNS
+		}
+
+		resp, err := e.client.ReserveIP(ctx, p.NetworkKey, req)
+		if err != nil {
+			if resp != nil {
+				return held, errors.Wrapf(err, "reserved IP %s", resp.IP)
+			}
+			return held, err
+		}
+		held = append(held, clusterbookclient.IPInfo{IP: resp.IP, Status: resp.Status, Cluster: p.ClusterName})
+	}
+
+	return held, nil
+}
+
+// releaseSurplus releases the addresses beyond count and returns the rest.
+// The primary address and the explicit spec IP are kept first.
+func (e *external) releaseSurplus(ctx context.Context, p v1alpha1.IPReservationParameters, held []clusterbookclient.IPInfo) ([]clusterbookclient.IPInfo, error) {
+	want := wantedCount(p)
+	if len(held) <= want {
+		return held, nil
+	}
+
+	// Order by what to keep: primary, explicit spec IP, then server order.
+	pi := primary(held, p)
+	ordered := []clusterbookclient.IPInfo{held[pi]}
+	var rest []clusterbookclient.IPInfo
+	for i, entry := range held {
+		switch {
+		case i == pi:
+		case p.IP != "" && entry.IP == fullIP(p.NetworkKey, p.IP):
+			ordered = append(ordered, entry)
+		default:
+			rest = append(rest, entry)
+		}
+	}
+	ordered = append(ordered, rest...)
+
+	for _, entry := range ordered[want:] {
+		if err := e.client.ReleaseIPs(ctx, p.NetworkKey, clusterbookclient.ReleaseRequest{IP: entry.IP}); err != nil {
+			return held, errors.Wrapf(err, "releasing surplus IP %s", entry.IP)
+		}
+	}
+
+	return ordered[:want], nil
+}
+
+// syncDNS brings the ":DNS" markers in line with the spec. clusterbook keeps
+// one record per cluster, so only the primary address may carry it.
+// Withdrawing a marker deletes the cluster's record, so stray markers are
+// removed first and the primary is asserted last. The primary is always
+// re-asserted: a failed DNS write leaves the marker without the record.
+func (e *external) syncDNS(ctx context.Context, p v1alpha1.IPReservationParameters, held []clusterbookclient.IPInfo) error {
+	if len(held) == 0 {
+		return nil
+	}
+	pi := primary(held, p)
+
+	for i, entry := range held {
+		if (i == pi && p.CreateDNS) || !hasDNS(entry.Status) {
+			continue
+		}
+		if err := e.updateEntry(ctx, p, entry, false); err != nil {
+			return err
+		}
+	}
+
+	if p.CreateDNS {
+		return e.updateEntry(ctx, p, held[pi], true)
+	}
+	return nil
+}
+
+// updateEntry rewrites one entry with its status stripped of ":DNS" and the
+// DNS flag set explicitly. Sending the marked status would switch DNS on
+// regardless of createDNS, so it could never be turned off.
+func (e *external) updateEntry(ctx context.Context, p v1alpha1.IPReservationParameters, entry clusterbookclient.IPInfo, createDNS bool) error {
+	status := strings.TrimSuffix(entry.Status, dnsMarker)
+	if status == "" {
+		status = defaultStatus
+	}
+	req := clusterbookclient.ReserveRequest{
+		Cluster:   p.ClusterName,
+		Status:    status,
+		CreateDNS: createDNS,
+	}
+	return errors.Wrapf(e.client.UpdateIP(ctx, p.NetworkKey, entry.IP, req), "updating IP %s", entry.IP)
 }
 
 func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.ExternalDelete, error) {
@@ -290,4 +417,100 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 
 func (e *external) Disconnect(_ context.Context) error {
 	return nil
+}
+
+const (
+	// dnsMarker is the status suffix clusterbook uses for DNS-backed entries.
+	dnsMarker = ":DNS"
+	// defaultStatus is what clusterbook records when a write names no status.
+	defaultStatus = "ASSIGNED"
+)
+
+func hasDNS(status string) bool { return strings.HasSuffix(status, dnsMarker) }
+
+// wantedCount is spec.count, which defaults to 1.
+func wantedCount(p v1alpha1.IPReservationParameters) int {
+	if p.Count < 1 {
+		return 1
+	}
+	return p.Count
+}
+
+// heldBy returns the entries assigned to cluster, in server order. Only an
+// empty status is free in clusterbook, so an entry without one is not held.
+func heldBy(entries []clusterbookclient.IPInfo, cluster string) []clusterbookclient.IPInfo {
+	var held []clusterbookclient.IPInfo
+	for _, entry := range entries {
+		if entry.Cluster == cluster && entry.Status != "" {
+			held = append(held, entry)
+		}
+	}
+	return held
+}
+
+// countFree returns how many entries clusterbook would hand out.
+func countFree(entries []clusterbookclient.IPInfo) int {
+	free := 0
+	for _, entry := range entries {
+		if entry.Status == "" {
+			free++
+		}
+	}
+	return free
+}
+
+// dnsMarked counts the entries carrying the ":DNS" marker.
+func dnsMarked(entries []clusterbookclient.IPInfo) int {
+	n := 0
+	for _, entry := range entries {
+		if hasDNS(entry.Status) {
+			n++
+		}
+	}
+	return n
+}
+
+func holds(entries []clusterbookclient.IPInfo, ip string) bool {
+	for _, entry := range entries {
+		if entry.IP == ip {
+			return true
+		}
+	}
+	return false
+}
+
+func addresses(entries []clusterbookclient.IPInfo) []string {
+	ips := make([]string, len(entries))
+	for i, entry := range entries {
+		ips[i] = entry.IP
+	}
+	return ips
+}
+
+// primary returns the index of the entry that carries, or should carry, the
+// cluster's DNS record: the one already marked, else the explicit spec IP,
+// else the first. entries must not be empty.
+func primary(entries []clusterbookclient.IPInfo, p v1alpha1.IPReservationParameters) int {
+	for i, entry := range entries {
+		if hasDNS(entry.Status) {
+			return i
+		}
+	}
+	if p.IP != "" {
+		for i, entry := range entries {
+			if entry.IP == fullIP(p.NetworkKey, p.IP) {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
+// fullIP expands a host part ("50") to the address clusterbook lists
+// ("10.31.103.50"); a full address is returned as is.
+func fullIP(networkKey, ip string) string {
+	if strings.Contains(ip, ".") {
+		return ip
+	}
+	return networkKey + "." + ip
 }

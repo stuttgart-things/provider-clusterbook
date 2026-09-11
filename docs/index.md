@@ -15,10 +15,12 @@ Crossplane Provider that manages IP reservations and optional PowerDNS records v
 When you create an `IPReservation` resource, the provider performs these steps:
 
 1. **Connect** to the clusterbook REST API using the URL from the `ClusterProviderConfig`
-2. **Reserve IPs** by calling `POST /api/v1/networks/{key}/reserve` with the cluster name and count
+2. **Reserve IPs** by calling `POST /api/v1/networks/{key}/reserve` once per address (the endpoint takes no count), starting from what the cluster already holds
 3. **Populate status** with the assigned IP addresses and assignment status
 4. **Poll for drift** on every interval by calling `GET /api/v1/networks/{key}/ips` and comparing assignments
 5. **Release IPs** on deletion by calling `POST /api/v1/networks/{key}/release`
+
+clusterbook saves an IP change before it touches DNS and reports the DNS outcome in the response. A reported DNS failure fails the reconcile, and the next reconcile re-asserts the record. Requires clusterbook v1.28.0 or later for `ip` to be honoured.
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────────────┐
@@ -96,9 +98,9 @@ my-cluster-ip    True    True     10.31.103    my-cluster    5m
 |-------|----------|---------|-------------|
 | `networkKey` | yes | -- | Network pool key (e.g. `10.31.103`) |
 | `clusterName` | yes | -- | Cluster to assign IPs to |
-| `count` | no | `1` | Number of IPs to reserve |
-| `ip` | no | -- | Explicit IP address (skip auto-reserve) |
-| `createDNS` | no | `false` | Create PDNS wildcard record for the IP |
+| `count` | no | `1` | Number of IPs to reserve; lowering it releases the surplus |
+| `ip` | no | -- | Explicit IP, reserved first; fails if another cluster holds it or it is not in the pool |
+| `createDNS` | no | `false` | Create a wildcard DNS record pointing at the explicit IP, else the first address |
 
 ## Clusterbook REST API Endpoints
 

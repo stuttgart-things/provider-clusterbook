@@ -131,9 +131,9 @@ $ kubectl get ipreservation my-cluster-ip -o jsonpath='{.status.atProvider}' | j
 |-------|------|----------|---------|-------------|
 | `networkKey` | string | Yes | — | Network pool key (e.g. `10.31.103`) |
 | `clusterName` | string | Yes | — | Cluster name to assign IPs to |
-| `count` | integer | No | 1 | Number of IPs to reserve |
-| `ip` | string | No | — | Explicit IP (skips auto-assignment) |
-| `createDNS` | boolean | No | false | Create a PDNS wildcard DNS record |
+| `count` | integer | No | 1 | Number of IPs to reserve; lowering it releases the surplus |
+| `ip` | string | No | — | Explicit IP, reserved first; fails if another cluster holds it or it is not in the pool |
+| `createDNS` | boolean | No | false | Create a wildcard DNS record pointing at the explicit IP, else the first address |
 
 ### Status (`atProvider`)
 
