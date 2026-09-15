@@ -51,7 +51,7 @@ jobs:
         if: steps.meta.outputs.version != ''
         uses: dagger/dagger-for-github@v8.4.1
         with:
-          version: "0.20.0"
+          version: "0.21.9"
           verb: call
           module: github.com/stuttgart-things/blueprints/kubernetes-microservice@v1.71.0
           args: >-
@@ -71,7 +71,7 @@ jobs:
       - name: Build & push image (latest tag)
         uses: dagger/dagger-for-github@v8.4.1
         with:
-          version: "0.20.0"
+          version: "0.21.9"
           verb: call
           module: github.com/stuttgart-things/blueprints/kubernetes-microservice@v1.71.0
           args: >-
